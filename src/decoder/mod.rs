@@ -72,8 +72,6 @@ pub struct Decoder<R: Read> {
     read_decoder: ReadDecoder<R>,
     /// Output transformations
     transform: Transformations,
-    /// Limits on resources the Decoder is allowed to use
-    limits: Limits,
 }
 
 /// A row of data with interlace information attached.
@@ -132,14 +130,16 @@ impl<R: Read> Decoder<R> {
 
     /// Create a new decoder configuration with custom limits.
     pub fn new_with_limits(r: R, limits: Limits) -> Decoder<R> {
+        let mut decode_options = DecodeOptions::default();
+        decode_options.set_limits(limits);
+
         Decoder {
             read_decoder: ReadDecoder {
                 reader: BufReader::with_capacity(CHUNCK_BUFFER_SIZE, r),
-                decoder: StreamingDecoder::new(),
+                decoder: StreamingDecoder::new_with_options(decode_options),
                 at_eof: false,
             },
             transform: Transformations::IDENTITY,
-            limits,
         }
     }
 
@@ -152,7 +152,6 @@ impl<R: Read> Decoder<R> {
                 at_eof: false,
             },
             transform: Transformations::IDENTITY,
-            limits: Limits::default(),
         }
     }
 
@@ -180,7 +179,7 @@ impl<R: Read> Decoder<R> {
     /// assert!(decoder.read_info().is_ok());
     /// ```
     pub fn set_limits(&mut self, limits: Limits) {
-        self.limits = limits;
+        self.read_decoder.decoder.set_limits(limits);
     }
 
     /// Read the PNG header and return the information contained within.
@@ -204,7 +203,7 @@ impl<R: Read> Decoder<R> {
     pub fn read_info(mut self) -> Result<Reader<R>, DecodingError> {
         self.read_header_info()?;
 
-        let mut reader = Reader::new(self.read_decoder, self.transform, self.limits);
+        let mut reader = Reader::new(self.read_decoder, self.transform);
         reader.read_until_image_data(true)?;
 
         Ok(reader)
@@ -303,6 +302,10 @@ impl<R: Read> ReadDecoder<R> {
     fn info(&self) -> Option<&Info> {
         self.decoder.info.as_ref()
     }
+
+    fn limits(&self) -> Limits {
+        self.decoder.limits()
+    }
 }
 
 /// PNG reader (mostly high-level interface)
@@ -327,8 +330,6 @@ pub struct Reader<R: Read> {
     transform: Transformations,
     /// Processed line
     processed: Vec<u8>,
-    /// How resources we can spend (for example, on allocation).
-    limits: Limits,
 }
 
 /// The subframe specific information.
@@ -372,7 +373,7 @@ macro_rules! get_info(
 
 impl<R: Read> Reader<R> {
     /// Creates a new PNG reader
-    fn new(read_decoder: ReadDecoder<R>, t: Transformations, limits: Limits) -> Reader<R> {
+    fn new(read_decoder: ReadDecoder<R>, t: Transformations) -> Reader<R> {
         Reader {
             decoder: read_decoder,
             bpp: BytesPerPixel::One,
@@ -384,7 +385,6 @@ impl<R: Read> Reader<R> {
             scan_start: 0,
             transform: t,
             processed: Vec::new(),
-            limits,
         }
     }
 
@@ -748,7 +748,7 @@ impl<R: Read> Reader<R> {
 
     fn allocate_out_buf(&mut self) -> Result<(), DecodingError> {
         let width = self.subframe.width;
-        let bytes = self.limits.bytes;
+        let bytes = self.decoder.limits().bytes;
         let buflen = match self.line_size(width) {
             Some(buflen) if buflen <= bytes => buflen,
             // Should we differentiate between platform limits and others?

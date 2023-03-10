@@ -17,6 +17,7 @@ use crate::common::{
 };
 use crate::text_metadata::{ITXtChunk, TEXtChunk, TextDecodingError, ZTXtChunk};
 use crate::traits::ReadBytesExt;
+use crate::Limits;
 
 /// TODO check if these size are reasonable
 pub const CHUNCK_BUFFER_SIZE: usize = 32 * 1024;
@@ -386,6 +387,7 @@ pub struct DecodeOptions {
     ignore_adler32: bool,
     ignore_crc: bool,
     ignore_text_chunk: bool,
+    limits: Limits,
 }
 
 impl Default for DecodeOptions {
@@ -394,6 +396,7 @@ impl Default for DecodeOptions {
             ignore_adler32: true,
             ignore_crc: false,
             ignore_text_chunk: false,
+            limits: Limits::default(),
         }
     }
 }
@@ -425,6 +428,11 @@ impl DecodeOptions {
     /// Defaults to `false`.
     pub fn set_ignore_text_chunk(&mut self, ignore_text_chunk: bool) {
         self.ignore_text_chunk = ignore_text_chunk;
+    }
+
+    /// Set the [`Limits`] for decoding.
+    pub fn set_limits(&mut self, limits: Limits) {
+        self.limits = limits;
     }
 }
 
@@ -531,6 +539,16 @@ impl StreamingDecoder {
     /// The decoder defaults to `false`.
     pub fn set_ignore_crc(&mut self, ignore_crc: bool) {
         self.decode_options.set_ignore_crc(ignore_crc)
+    }
+
+    /// Set the decoder [`Limits`].
+    pub fn set_limits(&mut self, limits: Limits) {
+        self.decode_options.set_limits(limits)
+    }
+
+    /// Returns the decoder [`Limits`].
+    pub fn limits(&self) -> Limits {
+        self.decode_options.limits
     }
 
     /// Low level StreamingDecoder interface.
@@ -767,15 +785,18 @@ impl StreamingDecoder {
     }
 
     fn reserve_current_chunk(&mut self) -> Result<(), DecodingError> {
-        // FIXME: use limits, also do so in iccp/zlib decompression.
-        const MAX: usize = 0x10_0000;
         let buffer = &mut self.current_chunk.raw_bytes;
 
         // Double if necessary, but no more than until the limit is reached.
-        let reserve_size = MAX.saturating_sub(buffer.capacity()).min(buffer.len());
+        let reserve_size = self
+            .decode_options
+            .limits
+            .bytes
+            .saturating_sub(buffer.capacity())
+            .min(buffer.len());
         buffer.reserve_exact(reserve_size);
 
-        if buffer.capacity() == buffer.len() {
+        if buffer.capacity() > self.decode_options.limits.bytes {
             Err(DecodingError::LimitsExceeded)
         } else {
             Ok(())
@@ -1134,8 +1155,7 @@ impl StreamingDecoder {
             let mut inflater = ZlibStream::new();
             while !buf.is_empty() {
                 let consumed_bytes = inflater.decompress(buf, &mut profile)?;
-                if profile.len() > 8000000 {
-                    // TODO: this should use Limits.bytes
+                if profile.capacity() > self.decode_options.limits.bytes {
                     return Err(DecodingError::LimitsExceeded);
                 }
                 buf = &buf[consumed_bytes..];
